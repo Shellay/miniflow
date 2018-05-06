@@ -4,21 +4,13 @@ from time import sleep
 import logging
 import io
 import unittest
+from queue import Queue
 
 
 class TestSugarFlow(unittest.TestCase):
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
-        buf = io.StringIO()
-        logger = logging.getLogger()
-        logger.setLevel(logging.INFO)
-        ch = logging.StreamHandler(buf)
-        ch.setFormatter(logging.Formatter('%(message)s'))
-        logger.addHandler(ch)
-
-        self.output_buffer = buf
-        self.logger = logger
         self.service = Service(n_workers=4)
 
     def setUp(self):
@@ -28,17 +20,20 @@ class TestSugarFlow(unittest.TestCase):
 
         TIME_FACTOR = 0.05
 
+        # use a thread-safe queue to store output of tasks
+        q = Queue()
+
         @task
         def eat(name):
-            self.logger.info(f'++ Eating {name}')
+            q.put(f'++ Eating {name}')
             sleep(len(name) * TIME_FACTOR)
-            self.logger.info(f'-- eaten {name}')
+            q.put(f'-- eaten {name}')
 
         @task
         def drink(name):
-            self.logger.info(f'++ Drinking {name}')
+            q.put(f'++ Drinking {name}')
             sleep(len(name) * TIME_FACTOR)
-            self.logger.info(f'-- drunk {name}')
+            q.put(f'-- drunk {name}')
 
         sugar_flow = (
             eat('dumping') ** (drink('soup') | drink('beer')) ** eat('roll')
@@ -50,13 +45,12 @@ class TestSugarFlow(unittest.TestCase):
 
         self.service.submit_chain(sugar_flow)
 
+        # wait for 1 second - workflow should already finish
         sleep(1)
 
-        self.output_buffer.seek(0)
-        out = self.output_buffer.read()
-        # print(out)
-        out_lines = out.split('\n')
-        # print(out_lines[0:3])
+        out_lines = []
+        while q.qsize():
+            out_lines.append(q.get())
 
         self.assertTrue('++ Eating dumping' in out_lines[0:3])
         self.assertTrue('++ Eating sausage' in out_lines[0:3])
