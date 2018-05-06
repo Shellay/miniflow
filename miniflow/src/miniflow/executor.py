@@ -20,16 +20,23 @@ class Result:
         self.value = value
 
 
+default_logger = logging.getLogger('canvas_executor')
+log_handler = logging.StreamHandler()
+log_handler.setLevel(logging.DEBUG)
+FORMAT = '[%(levelname)s] %(asctime)-15s [%(threadName)s] %(message)s'
+formatter = logging.Formatter(FORMAT)
+log_handler.setFormatter(formatter)
+default_logger.addHandler(log_handler)
+
+
 class Service:
 
-    def __init__(self, n_workers):
+    def __init__(self, n_workers, logger=default_logger):
+
+        self.logger = logger
 
         self.single_queue = Queue()
         self.result_queue = Queue()
-
-        FORMAT = '[%(levelname)s] %(asctime)-15s [%(threadName)s] %(message)s'
-        logging.basicConfig(format=FORMAT, level='DEBUG')
-        self.logger = logging.getLogger()
 
         self.workers = []
         for i in range(n_workers):
@@ -44,10 +51,19 @@ class Service:
         self.call_next_lock = RLock()
         self.call_next = {}
 
+        self.stop_signal = None
+        self.running_state_lock = RLock()
+        self.running = 0
+
     def start(self):
         for worker in self.workers:
             worker.start()
         self.handler.start()
+
+    def stop(self):
+        for _ in self.workers:
+            self.single_queue.put(self.stop_signal)
+        self.result_queue.put(self.stop_signal)
 
     def submit_task(self, task: Task):
 
@@ -90,22 +106,35 @@ class Service:
             self.submit_task(task)
 
     def work(self):
-        try:
-            while True:
-                # single_task can be either Single or End
-                single_task = self.single_queue.get()
-                try:
-                    value = single_task.run()
-                except Exception as e:
-                    value = e
-                result = Result(single_task, value)
-                self.result_queue.put(result)
-        except KeyboardInterrupt:
-            pass
+
+        with self.running_state_lock:
+            self.running += 1
+
+        while True:
+            # single_task can be either Single or End, or a stop signal for graceful stop.
+            single_task = self.single_queue.get()
+
+            if single_task is self.stop_signal:
+                self.logger.debug('Exiting.')
+                with self.running_state_lock:
+                    self.running -= 1
+                break
+
+            try:
+                value = single_task.run()
+            except Exception as e:
+                value = e
+            result = Result(single_task, value)
+            self.result_queue.put(result)
 
     def handle(self):
         while True:
             result = self.result_queue.get()
+
+            if result is self.stop_signal:
+                self.logger.debug('Exiting.')
+                break
+
             if isinstance(result.task, End):
                 # chain end indicates synchronization
                 end = result.task
